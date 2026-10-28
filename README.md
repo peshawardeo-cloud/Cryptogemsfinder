@@ -36,3 +36,4 @@ Per scan: DexScreener max 60 requests (retries included, sequential); GeckoTermi
 
 ## Known limitations
 Daily cron makes 1h/6h follow-ups mostly "Insufficient history". Stops and targets are evaluated at scan time only. No creator-wallet or LP-lock analysis. No settings UI (edit `strategy_settings.settings` JSON; see `lib/score.ts` DEFAULTS). Keyless GeckoTerminal is officially unsuited to scheduled polling; a free CoinGecko Demo key is the documented upgrade path (not implemented).
+ 
