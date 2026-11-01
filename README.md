@@ -36,4 +36,9 @@ Per scan: DexScreener max 60 requests (retries included, sequential); GeckoTermi
 
 ## Known limitations
 Daily cron makes 1h/6h follow-ups mostly "Insufficient history". Stops and targets are evaluated at scan time only. No creator-wallet or LP-lock analysis. No settings UI (edit `strategy_settings.settings` JSON; see `lib/score.ts` DEFAULTS). Keyless GeckoTerminal is officially unsuited to scheduled polling; a free CoinGecko Demo key is the documented upgrade path (not implemented).
- 
+
+## Troubleshooting: dashboard shows N/A and no scan history
+1. Press **Scan now**: the result (SUCCESS / PARTIAL / FAILED / UNAUTHORIZED + reason) is shown next to the button. A red DATABASE ERROR banner means Supabase queries are failing (migrations missing or wrong URL/key): N/A then does **not** mean "no data".
+2. `GET /api/scan` HTTP codes: 200 success or partial (read `status` in the body), 409 duplicate/running, 500 schema/db/exception, 502 failed (no data), 401 bad bearer.
+3. The page and `/auth` issue the Basic-auth challenge themselves, so the dashboard is protected even if `middleware.ts` is missing from the deployment. Confirm `middleware.ts` is at the repo root and the Vercel build log lists `ƒ Middleware`.
+4. Migrations 002 and 003 are idempotent (safe to re-run). **001 is not**: never re-run it on a populated database.

@@ -1,10 +1,15 @@
 import {db,dbReady,getSettings} from '@/lib/db'
 import {scanNow,openTrade,closeTrade} from './actions'
+import ScanButton from '@/components/ScanButton'
+import {headers} from 'next/headers'
+import {redirect} from 'next/navigation'
+import {authorized} from '@/lib/auth'
 import TradeForm from '@/components/TradeForm'
 import {isStale,outcomes} from '@/lib/util'
 import {balance} from '@/lib/trades'
 import Copy from '@/components/Copy'
 export const dynamic='force-dynamic'
+export const maxDuration=60
 const na=(v:any,f:(x:number)=>string=x=>String(x))=>v==null?'N/A':f(Number(v))
 const usd=(v:any)=>na(v,x=>'$'+(Math.abs(x)<1?x.toPrecision(3):Math.round(x).toLocaleString('en-US')))
 const pct=(v:any)=>na(v,x=>x.toFixed(1)+'%')
@@ -34,32 +39,37 @@ function Cands({rows,trade}:{rows:any[],trade:boolean}){
   </tbody></table>
 }
 export default async function Page(){
+  if(!authorized(headers().get('authorization'))) redirect('/auth')
   if(!dbReady()) return <main className="p-6">Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (see README), then run the migration.</main>
   const d=db(),s=await getSettings()
-  const {data:runs}=await d.from('scan_runs').select('*').order('started_at',{ascending:false}).limit(10)
+  const {data:runs,error:eRuns}=await d.from('scan_runs').select('*').order('started_at',{ascending:false}).limit(10)
   const last=runs?.find((r:any)=>['success','partial'].includes(r.status))
-  const {data:snaps}=last?await d.from('token_snapshots').select('*').eq('scan_id',last.id).order('score',{ascending:false}):{data:[]}
-  const {data:trades}=await d.from('paper_trades').select('*').order('opened_at',{ascending:false})
+  const {data:snaps,error:eSnaps}=last?await d.from('token_snapshots').select('*').eq('scan_id',last.id).order('score',{ascending:false}):{data:[]}
+  const {data:trades,error:eTr}=await d.from('paper_trades').select('*').order('opened_at',{ascending:false})
   const S=snaps||[],T=trades||[],open=T.filter((t:any)=>t.status==='open'),closed=T.filter((t:any)=>t.status==='closed')
   const realized=closed.reduce((a:number,t:any)=>a+(t.realized_pnl_usd||0),0)
   const unreal=(t:any)=>t.last_price==null?null:t.size_usd*(t.last_price/t.entry_price-1)
   const unrealSum=open.reduce((a:number,t:any)=>a+(unreal(t)||0),0)
   const stale=isStale(last?.finished_at),latest=runs?.[0]
-  const {data:hist}=await d.from('token_snapshots').select('mint,observed_at,price,status').gte('observed_at',new Date(Date.now()-8*864e5).toISOString()).limit(5000)
+  const {data:hist,error:eHist}=await d.from('token_snapshots').select('mint,observed_at,price,status').gte('observed_at',new Date(Date.now()-8*864e5).toISOString()).limit(5000)
   const H=hist||[],grp:[string,string[]][]=[['Research candidates / elevated risk',['RESEARCH_CANDIDATE','ELEVATED_RISK']],['Watchlist',['WATCHLIST']],['Rejected',['REJECTED']]]
   const wins=closed.filter((t:any)=>t.realized_pnl_usd>0),losses=closed.filter((t:any)=>t.realized_pnl_usd<=0)
   const avg=(a:any[],f:(t:any)=>number)=>a.length?a.reduce((x,t)=>x+f(t),0)/a.length:null
   let eq=0,peak=0,dd=0;for(const t of [...closed].sort((a:any,b:any)=>+new Date(a.exit_at)-+new Date(b.exit_at))){eq+=t.realized_pnl_usd;peak=Math.max(peak,eq);dd=Math.max(dd,peak-eq)}
   const bands=[[0,50],[50,60],[60,70],[70,101]].map(([lo,hi])=>{const x=closed.filter((t:any)=>t.entry_score>=lo&&t.entry_score<hi);return {l:`${lo}-${Math.min(hi,100)}`,n:x.length,pnl:x.reduce((a:number,t:any)=>a+t.realized_pnl_usd,0)}})
+  const qe=[eRuns,eSnaps,eTr,eHist].filter(Boolean).map((e:any)=>String(e.message).slice(0,200))
   return <main className="mx-auto max-w-[1400px] p-4">
     <header className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-2xl font-semibold">Solana Gem Radar <span className="text-sm font-normal text-slate-400">research &amp; paper trading only</span></h1>
-      <form action={scanNow}><button className="rounded bg-sky-700 px-3 py-1.5">Scan now</button></form></header>
+      <ScanButton action={scanNow}/></header>
     <p className="mt-2 text-xs text-slate-400">Not financial advice. Scores are rule-based research aids, not predictions. Third-party risk checks do not guarantee safety. Discovery uses DexScreener profile/boost feeds only: it is <b>not</b> an exhaustive list of new Solana tokens. No wallet, keys or real trades. Market data: DexScreener; new-pool data powered by <a className="text-sky-400" href="https://www.geckoterminal.com" target="_blank" rel="noreferrer">GeckoTerminal</a>; safety data: RugCheck (unverified integration). <a className="text-sky-400" href="/api/diagnostics">Diagnostics</a>.</p>
     {latest&&latest.status!=='success'&&<p className="mt-2 rounded bg-rose-900/40 p-2 text-sm text-rose-200">{latest.status==='partial'?'INCOMPLETE SCAN (a source or check failed; the candidate list may be missing tokens)':'Latest scan '+latest.status}: {latest.error||'in progress'}</p>}
     {last?.error&&last.id!==latest?.id&&<p className="mt-2 text-xs text-amber-200">Last successful scan had source errors, so the discovery sample is incomplete: {last.error}</p>}
     {stale&&<p className="mt-2 rounded bg-amber-900/40 p-2 text-sm text-amber-200">Data is stale or no successful scan exists yet.</p>}
+    {qe.length>0&&<p className="mt-2 rounded bg-rose-900/60 p-2 text-sm text-rose-100">DATABASE ERROR: {qe.join(' | ')}. The N/A values below do NOT mean there is no data. Check that migrations 001, 002 and 003 were run and that SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are correct (see /api/diagnostics).</p>}
+    {!qe.length&&!(runs||[]).length&&<p className="mt-2 rounded bg-amber-900/40 p-2 text-sm text-amber-200">No scans have been recorded yet. Press Scan now; the result will be shown next to the button.</p>}
+    {latest?.diagnostics?.length>0&&<p className="mt-1 text-xs text-slate-400">Latest scan requests: {latest.diagnostics.map((x:any)=>`${x.source} HTTP ${x.status??'ERR'} ${x.ms??'?'}ms schema:${x.schemaOk==null?'?':x.schemaOk?'ok':'FAIL'}`).join(' · ')}</p>}
     <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-6">
-      <Card k="Latest successful scan" v={last?new Date(last.finished_at).toLocaleString():'N/A'}/><Card k="Discovered" v={na(last?.discovered)}/><Card k="Passed filters" v={na(last?.passed_filters)}/>
+      <Card k="Latest completed scan" v={last?new Date(last.finished_at).toLocaleString()+(last.status==='partial'?' (INCOMPLETE)':''):'N/A'}/><Card k="Discovered" v={na(last?.discovered)}/><Card k="Passed filters" v={na(last?.passed_filters)}/>
       <Card k="Passed safety (PASS)" v={na(last?.passed_safety)}/><Card k="Active paper trades" v={open.length}/><Card k="Paper P/L (realized + unrealized)" v={usd(realized+unrealSum-open.reduce((a:number,t:any)=>a+t.entry_cost_usd,0))}/></div>
     <p className="mt-1 text-xs text-slate-400">Paper balance: {usd(balance(s.startBalance,T))} free of {usd(s.startBalance)} start. Rows below are the stored snapshot from the last scan, not live prices.</p>
     <Sec t="Today's Research Candidates"><Cands trade rows={S.filter((r:any)=>['RESEARCH_CANDIDATE','ELEVATED_RISK'].includes(r.status))}/></Sec>

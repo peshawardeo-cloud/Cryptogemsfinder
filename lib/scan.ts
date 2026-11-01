@@ -8,13 +8,31 @@ const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms))
 const must=(r:any,w:string)=>{if(r?.error) throw new Error(`${w}: ${r.error.message}`);return r}
 const num=(x:any)=>{const v=Number(x);return x==null||!isFinite(v)?null:v}
 const iso=(t:any)=>t?new Date(t).toISOString():null
-export async function runScan(trigger:string){
+export type ScanResult={ok:boolean,status:'success'|'partial'|'failed'|'rejected',code:string,message:string,discovered?:number,requests?:number}
+const REQ:[string,string,string][]=[['scan_runs','id','001_init.sql'],['paper_trades','id','001_init.sql'],['tokens','last_seen','002_integrity.sql'],['token_snapshots','source_kind','002_integrity.sql'],['scan_runs','diagnostics','003_diagnostics.sql']]
+// Fail fast with an actionable message when migrations are missing or credentials are wrong (instead of hanging in 'running' or hiding the error).
+async function schemaProblem(d:any){
+  for(const [t,c,m] of REQ){const {error}=await d.from(t).select(c).limit(1)
+    if(error) return `Database check failed for ${t}.${c}: ${String(error.message).slice(0,160)}. `+(/does not exist|schema cache|relation|column/i.test(error.message)?`Run supabase/migrations/${m} in the Supabase SQL editor.`:'Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel and redeploy.')}
+  return null
+}
+// Never let a failed status write leave a run stuck in 'running': retry without the optional diagnostics column, then throw.
+async function finish(d:any,id:string,payload:any){
+  let r=await d.from('scan_runs').update(payload).eq('id',id)
+  if(r.error){const {diagnostics,...rest}=payload;r=await d.from('scan_runs').update(rest).eq('id',id)}
+  if(r.error) throw new Error('Could not record scan result: '+String(r.error.message).slice(0,160))
+}
+export async function runScan(trigger:string):Promise<ScanResult>{
+  try{return await run(trigger)}catch(e:any){return {ok:false,status:'failed',code:'exception',message:'Scan error: '+String(e.message).slice(0,300)}}
+}
+async function run(trigger:string):Promise<ScanResult>{
   const d=db(),s=await getSettings()
+  const sp=await schemaProblem(d);if(sp) return {ok:false,status:'failed',code:'schema',message:sp}
   await d.from('scan_runs').update({status:'failed',error:'timed out / abandoned',finished_at:new Date().toISOString()}).eq('status','running').lt('started_at',new Date(Date.now()-10*60000).toISOString())
   const {data:recent}=await d.from('scan_runs').select('id').gte('started_at',new Date(Date.now()-3*60000).toISOString()).limit(1)
-  if(recent?.length) return {ok:false,error:'A scan started in the last 3 minutes (duplicate protection).'}
+  if(recent?.length) return {ok:false,status:'rejected',code:'duplicate',message:'A scan started in the last 3 minutes (duplicate protection). Wait and retry.'}
   const {data:run,error:e0}=await d.from('scan_runs').insert({trigger}).select('id').single()
-  if(e0) return {ok:false,error:e0.code==='23505'?'A scan is already running.':e0.message}
+  if(e0) return e0.code==='23505'?{ok:false,status:'rejected',code:'running',message:'A scan is already running.'}:{ok:false,status:'failed',code:'db',message:'Could not create scan record: '+String(e0.message).slice(0,200)}
   const bud=new Budget(s.maxRequests),t0=Date.now()
   try{
     const {found,counts,errors}=await discover(bud)
@@ -47,10 +65,13 @@ export async function runScan(trigger:string){
     }catch(e:any){errors.push('followup: '+e.message)}
     await markTrades(bud)
     const okF=rows.filter(r=>!r.ev.hard.length&&!r.ev.soft.length)
-    await d.from('scan_runs').update({status:scanStatus(errors,rows.length),diagnostics:bud.log.slice(-80),finished_at:new Date().toISOString(),discovered:rows.length,passed_filters:okF.length,passed_safety:okF.filter(r=>r.risk?.status==='PASS').length,requests_used:bud.used,source_counts:counts,error:errors.join(' | ')||(rows.length?null:'No pairs returned')}).eq('id',run.id)
-    return {ok:rows.length>0&&!errors.length,status:scanStatus(errors,rows.length)}
+    const status=scanStatus(errors,rows.length)
+    await finish(d,run.id,{status:scanStatus(errors,rows.length),diagnostics:bud.log.slice(-80),finished_at:new Date().toISOString(),discovered:rows.length,passed_filters:okF.length,passed_safety:okF.filter(r=>r.risk?.status==='PASS').length,requests_used:bud.used,source_counts:counts,error:errors.join(' | ')||(rows.length?null:'No pairs returned')})
+    const message=status==='success'?`Scan succeeded: ${rows.length} tokens stored, ${okF.length} passed filters, ${bud.used} DexScreener requests.`:status==='partial'?`INCOMPLETE SCAN (${rows.length} tokens stored): ${errors.join(' | ')}`:`Scan failed: ${errors.join(' | ')||'no pairs returned'}`
+    return {ok:status==='success',status,code:status,message,discovered:rows.length,requests:bud.used}
   }catch(e:any){
-    await d.from('scan_runs').update({status:'failed',finished_at:new Date().toISOString(),requests_used:bud.used,error:e.message,diagnostics:bud.log.slice(-80)}).eq('id',run.id)
-    return {ok:false,error:e.message}
+    const msg=String(e.message).slice(0,300)
+    try{await finish(d,run.id,{status:'failed',finished_at:new Date().toISOString(),requests_used:bud.used,error:msg,diagnostics:bud.log.slice(-80)})}catch(e2:any){return {ok:false,status:'failed',code:'db',message:`${msg} (and the failure could not be recorded: ${String(e2.message).slice(0,120)})`}}
+    return {ok:false,status:'failed',code:'exception',message:'Scan failed: '+msg}
   }
 }

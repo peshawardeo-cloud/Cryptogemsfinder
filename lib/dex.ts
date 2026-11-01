@@ -68,6 +68,7 @@ export async function geckoNew(b:Budget|null,pages=1):Promise<{mints:string[],er
       note(b,{source:label,status:r.status,ms:Date.now()-t,schemaOk:ok})
       if(!ok) return {mints,error:'GeckoTerminal unexpected schema'}
       for(const x of j.data){const id=String(x?.relationships?.base_token?.data?.id||'').replace(/^solana_/,'');if(MINT.test(id)&&!mints.includes(id)) mints.push(id)}
+      if(!mints.length){const m=b?.log.at(-1);if(m)m.schemaOk=false;return {mints,error:j.data.length?`GeckoTerminal returned ${j.data.length} pools but no mint could be extracted (response schema mismatch)`:'GeckoTerminal returned 0 pools'}}
     }catch(e:any){note(b,{source:label,status:null,ms:Date.now()-t,schemaOk:null,error:String(e.message).slice(0,120)});return {mints,error:'GeckoTerminal error: '+String(e.message).slice(0,80)}}
   }
   return {mints}

@@ -8,7 +8,12 @@ import {authorized} from '@/lib/auth'
 import {exitPnl,slipPct,FEE_PCT,balance} from '@/lib/trades'
 type R={ok:boolean,msg:string}
 const deny=()=>!authorized(headers().get('authorization'))
-export async function scanNow(){ if(deny()) return; await runScan('manual');revalidatePath('/')}
+export type ScanUi={ok:boolean,status:string,msg:string}
+export async function scanNow(_:ScanUi|null,__?:FormData):Promise<ScanUi>{
+  if(deny()) return {ok:false,status:'unauthorized',msg:'Unauthorized: the server did not receive your login credentials. Reload the page and sign in, or run the scan with curl (see README).'}
+  try{const r=await runScan('manual');revalidatePath('/');return {ok:r.ok,status:r.status,msg:r.message}}
+  catch(e:any){return {ok:false,status:'failed',msg:'Scan error: '+String(e.message).slice(0,300)}}
+}
 export async function openTrade(_:R|null,fd:FormData):Promise<R>{
   if(deny()) return {ok:false,msg:'Unauthorized'}
   const mint=String(fd.get('mint')||'');if(!MINT.test(mint)) return {ok:false,msg:'Invalid mint'}
